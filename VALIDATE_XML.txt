@@ -1,0 +1,416 @@
+CREATE OR REPLACE PROCEDURE SCHEMA_NAME.VALIDATE_XML()
+RETURNS VARIANT
+LANGUAGE SQL
+EXECUTE AS CALLER
+AS '
+
+DECLARE
+  -- Point 1: Initialize counters to 0
+  VALID_RECORD_COUNT   NUMBER := 0;
+  REJECT_RECORD_COUNT  NUMBER := 0;
+  VALID_ROW_COUNT   NUMBER := 0;
+  REJECT_ROW_COUNT  NUMBER := 0;
+  PRESIGNED_URL STRING;
+  
+  
+  BEGIN
+  ------------------------------------------------------------------------------------------------------------------------
+  -- Point 2: Create TEMP table from XML_TEST
+  -- Add a row-number (RN) using SEQ4() so we can preserve the original scan order.
+  -- NOTE: Without a natural ordering column, SEQ4() reflects the scan order during this run. 
+  ------------------------------------------------------------------------------------------------------------------------
+  
+  REMOVE @SCHEMA_NAME.TEST_STAGE/TARGET_XML_FILE_NAME.txt;
+  
+  TRUNCATE TABLE SCHEMA_NAME.XML_VALID_RECORDS;
+  TRUNCATE TABLE SCHEMA_NAME.XML_INVALID_RECORDS;
+  TRUNCATE TABLE SCHEMA_NAME.VALID_GROUPED_TEMP;
+  
+  CREATE OR REPLACE TABLE SCHEMA_NAME.XML_VALIDATION_TEMP_HEADER AS  
+  SELECT SEQ4() AS RN,
+		* 
+
+  FROM  SCHEMA_NAME.SOURCE_TABLE
+  WHERE XML_DATA LIKE''%<ROOT_TAG_NAME>%''
+  OR XML_DATA LIKE''%<P1_TAG_NAME>%'';
+
+  CREATE OR REPLACE TABLE SCHEMA_NAME.XXML_VALIDATION_TEMP_BODY AS
+  SELECT
+      SEQ4() AS RN,
+      *
+
+  FROM SCHEMA_NAME.XML_TEST
+  WHERE XML_DATA NOT LIKE''%<HEADER_TAGS>%'';
+
+  /*--------------THE LAG FUNCTION IS USED TO COMPARE BODY TAGS CONDITIONAL RULES ------------*/   
+
+  
+  CREATE OR REPLACE TEMP TABLE SCHEMA_NAME.XML_BODY_TAG1_TO_BODY_TAG2_COMPARISON  AS
+  SELECT 
+  RN,XML_DATA,LAG(XML_DATA,7) OVER(ORDER BY RN ) AS LAGG  
+  FROM SCHEMA_NAME.XML_TEST;
+  
+  ------------------------------------------------------------------------
+  -- Point 3: Apply validations via CASE, split valid vs reject, and insert
+  --          to destination tables in the original order (ORDER BY RN).
+  --
+
+  ------------------------------------------------------------------------
+  CREATE OR REPLACE TABLE SCHEMA_NAME.VALIDATED_A1_A2 AS 
+    SELECT
+      v.*,
+      /* ---- :VALIDATION LOGIC: ---- */
+      CASE
+      --RULE TO Validate TAG1 row
+       WHEN XML_DATA LIKE ''%<TAG1>%'' THEN
+            CASE 
+                WHEN LENGTH(
+                    TRIM(
+                        SPLIT(
+                            SPLIT(XML_DATA, ''<TAG1>'')[1],
+                            ''</TAG1>''
+                        )[0]
+                    )
+                ) = 2 
+                
+                /*--- TO HANDLE THE RULE FOR SAME AGENCY VALUE OF ALL RECORD  ---*/
+                AND COUNT(DISTINCT TRIM(
+                        SPLIT(
+                            SPLIT(XML_DATA, ''<TAG1>'')[1],
+                            ''</TAG1>''
+                        )[0]
+                    )) = 1 
+                THEN ''VALID''
+                ELSE ''INVALID''
+            END
+       
+
+            ,'' ; '')
+       -- Everything else is INVALID
+       ELSE ''''
+       END AS REASON   
+     
+    FROM SCHEMA_NAME.XML_VALIDATION_TEMP_A1_A2 v
+    GROUP BY 1,2;
+  
+
+  -- Compute counts for this run
+  SELECT COUNT(*) INTO :VALID_ROW_COUNT
+  FROM SCHEMA_NAME.VALIDATED_A1_A2
+  WHERE FLAG = ''VALID'';
+
+  SELECT COUNT(*) INTO :REJECT_ROW_COUNT
+  FROM SCHEMA_NAME.VALIDATED_A1_A2
+  WHERE FLAG = ''INVALID'';
+
+  /* -----IF A1 OR A2 IS INVALID QUIT FURTHER VALIDATION --------*/
+  
+  IF (REJECT_ROW_COUNT > 0) THEN
+      RETURN OBJECT_CONSTRUCT(
+            TO_VARCHAR(''FIELDS_TAG1_OR_TAG2_ARE_NOT_VALID''), REJECT_ROW_COUNT,
+            TO_VARCHAR(''FIELDS_TAG1_OR_TAG2_ARE_NOT_VALID_HENCE''), TO_VARCHAR(''QUITING_FURTHER_EVALUATION.''),
+            TO_VARCHAR(''STATUS''), TO_VARCHAR(''FAILED_VALIDATION'')
+      );
+  END IF;
+
+  CREATE OR REPLACE TABLE SCHEMA_NAME.VALIDATED_A3_A14 AS 
+    SELECT
+    v.RN,V.XML_DATA,
+    /* ---- :VALIDATION LOGIC: ---- */
+    CASE
+       -- RULE TO Validate <record> & <record> 
+       WHEN V.XML_DATA LIKE ''%<record>%''
+                OR V.XML_DATA LIKE ''%</record>%'' THEN ''VALID''
+                
+
+       
+    /*----       THIS FIELD IS SUBJECT TO CHANGE | FOR NOW WE ARE TESTING IT AGAINST PERSON ID = 18 LENGTH       ---*/
+    /*----       ONCE THE FIELD IS POINTED TO PERSON_ID__C WE WILL UPDATE TO CHECK LENGTH = 12                   ---*/
+       
+       WHEN V.XML_DATA LIKE ''%<TAG3>%'' THEN
+            CASE 
+                WHEN LENGTH(
+                    TRIM(
+                        SPLIT(
+                            SPLIT(V.XML_DATA, ''<TAG3>'')[1],
+                            ''</TAG3>''
+                        )[0]
+                    )
+                ) = 18 
+                .
+                .
+                .
+                .
+                .
+                .
+                .
+                # AND SO ON
+                # AND SO ON
+                # AND SO ON
+                # AND SO ON
+                          
+                    THEN ''VALID''
+                    ELSE ''INVALID''
+                    END 
+
+                 ---RULE TO  Validate  EMPTY FIELDS  row
+                WHEN V.XML_DATA LIKE ''%/>%'' 
+                THEN ''INVALID''
+
+ 
+       -- Everything else is INVALID
+       ELSE ''INVALID''
+       END AS FLAG 
+    ,
+        /*--- THIS CASE PASS EVALUATES THE TAGS & RECORDS THE FAILURE CONDITIONS UNDER THE REASONS COLUMN ---*/
+           
+       CASE
+       --RULE TO Validate TAG3 row
+       WHEN V.XML_DATA LIKE ''%<TAG3>%'' 
+       THEN
+ 
+       /*--- THE IFF CONDITIONS USED BELOW FACILITATES TO EVALUATE & STORE EACH RULE INDIPENDENTLY
+       WHICH CASE ST CAN NOT ---*/
+ 
+        ARRAY_TO_STRING(ARRAY_CONSTRUCT_COMPACT(IFF(LENGTH(
+                    TRIM(
+                        SPLIT(
+                            SPLIT(V.XML_DATA, ''<TAG3>'')[1],
+                            ''</TAG3>''
+                        )[0]
+                    )
+                ) <> 18 ,'' TAG3 length invalid '' ,null)
+                
+
+                ,IFF( COUNT(DISTINCT TRIM(
+                        SPLIT(
+                            SPLIT(V.XML_DATA, ''<TAG3>'')[1],
+                            ''</TAG3>''
+                        )[0]
+                    )) <> 1 ,''TAG3 not unique '' ,null)
+               
+                       
+                )
+            ,'' ; '')
+
+                
+            .
+            .
+            .
+            #AND SO ON
+            #AND SO ON
+            #AND SO ON
+            #AND SO ON
+            #AND SO ON
+            #AND SO ON
+            #AND SO ON
+            #AND SO ON
+                 
+                ,'' ; '') 
+
+
+ 			     
+    
+    -- Everything else is INVALID
+    ELSE ''''
+    END AS REASON 
+
+    FROM CDI_DEVBI_DB.FED_TEST_SCHEMA.XML_VALIDATION_TEMP_A3_A14 V 
+    
+    ORDER BY V.RN;
+    
+
+    /*-- CREATE & POPULATE VALID RECORDS FINAL TABLE ----*/
+
+      
+
+     CREATE OR REPLACE TABLE  CDI_DEVBI_DB.FED_TEST_SCHEMA.XML_VALID_RECORDS 
+    (
+        XML_DATA VARCHAR(16777216)
+    )
+    ;
+    /* --- INSERT A1 & A2 | SINCE VALIDATION HAPPENED - ITS DIRECT INSERT ---*/
+    
+    
+    START TRANSACTION;      
+    
+    INSERT INTO  SCHEMA_NAME.XML_VALID_RECORDS 
+    SELECT XML_DATA FROM  SCHEMA_NAME.XML_TEST
+    WHERE XML_DATA LIKE''%<HEADER_TAGS>%'';
+
+    COMMIT;
+
+    
+
+    
+    /* --- INSERT <records> ---*/
+
+    START TRANSACTION;    
+    
+    INSERT INTO  SCHEMA_NAME.XML_VALID_RECORDS
+    SELECT * FROM  SCHEMA_NAME.XML_TEST
+    WHERE XML_DATA LIKE''%<records>%'';
+
+    COMMIT;
+
+    
+    /* --- INSERTION OF VALID RECORDS FOR SET OF A3 TO A14  ---*/
+
+    START TRANSACTION;
+    
+    CREATE OR REPLACE TABLE VALID_GROUPED_TEMP AS 
+    SELECT t.*,
+    SUM(
+        CASE WHEN XML_DATA LIKE ''%<record>%'' THEN 1
+        ELSE 0
+        END
+    )  OVER (ORDER BY t.RN ROWS UNBOUNDED PRECEDING) AS grp
+    FROM SCHEMA_NAME.VALIDATED_TAG3_TAG14 AS t
+    ORDER BY t.RN;
+
+    COMMIT;
+
+    
+
+    START TRANSACTION;
+
+    COPY INTO @STAGE_NAME/VALID_GROUPED_TEMP_output.txt
+    FROM (
+    	SELECT XML_DATA  FROM SCHEMA_NAME.VALID_GROUPED_TEMP
+        QUALIFY
+        (COUNT(*) OVER (PARTITION BY grp) = 19
+        AND COUNT_IF(FLAG = ''VALID'') OVER (PARTITION BY grp) = 19)
+        ORDER BY RN,grp 
+    )
+    FILE_FORMAT = (
+    	TYPE = CSV
+    	FIELD_DELIMITER = '',''
+    	RECORD_DELIMITER = ''
+''
+        COMPRESSION = NONE
+    	FILE_EXTENSION = ''txt''
+    )
+    SINGLE = TRUE ;
+    --- OVERWRITE = TRUE;
+
+    
+
+    COPY INTO SCHEMA_NAME.XML_VALID_RECORDS
+    FROM (
+    	SELECT $1 FROM @STAGE_NAME/TARGET_FILE_NAME_VALID_GROUPED_TEMP_output.txt  
+    )
+    FILE_FORMAT = (
+    	TYPE = CSV
+    	FIELD_DELIMITER = '',''
+    	RECORD_DELIMITER = ''
+''
+        
+    	
+    );   
+
+
+    
+    COMMIT;
+    
+    START TRANSACTION;
+
+
+    /* --- INSERT </records> ---*/
+    INSERT INTO  SCHEMA_NAME.XML_VALID_RECORDS
+    SELECT * FROM  SCHEMA_NAME.XML_TEST
+    WHERE XML_DATA LIKE''%</records>%''; 
+
+    COMMIT ;
+
+    /* --- INSERT FOOTER  ---*/
+
+    START TRANSACTION;
+
+    INSERT INTO  SCHEMA_NAME.XML_VALID_RECORDS
+    SELECT * FROM  SCHEMA_NAME.XML_TEST
+    WHERE XML_DATA LIKE''%</data>%''; 
+    
+    COMMIT ;
+    
+    /*-- CREATE & POPULATE INVALID RECORDS FINAL TABLE ----*/
+    
+    CREATE OR REPLACE TABLE SCHEMA_NAME.XML_INVALID_RECORDS AS 
+    SELECT * FROM SCHEMA_NAME.VALIDATED_TAG3_TAG14 WHERE 1=2;
+
+    /*--- GROUPING INVALID RECORDS IF ANY OF THE XML RECORD IS INVALID ---*/
+    CREATE OR REPLACE TABLE  SCHEMA_NAME.REJECT_GROUPED_TEMP AS
+    SELECT
+    t.*,
+    CEIL(ROW_NUMBER() OVER (ORDER BY SEQ4()) / 19) AS grp
+    FROM SCHEMA_NAME.VALIDATED_TAG3_TAG14 AS t;
+
+    INSERT INTO SCHEMA_NAME.XML_INVALID_RECORDS
+    SELECT RN,XML_DATA,FLAG,REASON
+    FROM SCHEMA_NAME.REJECT_GROUPED_TEMP
+    QUALIFY
+    COUNT(*) OVER (PARTITION BY grp) = 19
+    AND COUNT_IF(FLAG = ''VALID'') OVER (PARTITION BY grp) < 19
+    ORDER BY RN,grp; 
+
+    /*-- COUNT OF VALID RECORDS ----*/
+    
+    WITH VALID_RECORD_COUNT_TEMP as (
+    SELECT *
+        FROM SCHEMA_NAME.VALID_GROUPED_TEMP
+        QUALIFY
+        COUNT(*) OVER (PARTITION BY grp) = 19
+        AND COUNT_IF(FLAG = ''VALID'') OVER (PARTITION BY grp) = 19
+        ORDER BY RN,grp
+    )
+    SELECT COUNT(DISTINCT GRP) INTO:VALID_RECORD_COUNT
+    FROM VALID_RECORD_COUNT_TEMP;
+
+    /*-- COUNT OF INVALID RECORDS ----*/
+   WITH REJECT_RECORD_COUNT_TEMP as (
+    SELECT *
+        FROM SCHEMA_NAME.REJECT_GROUPED_TEMP
+        QUALIFY
+        COUNT(*) OVER (PARTITION BY grp) = 19
+        AND COUNT_IF(FLAG = ''VALID'') OVER (PARTITION BY grp) < 19
+        ORDER BY RN,grp
+    )
+    SELECT COUNT(DISTINCT GRP) INTO :REJECT_RECORD_COUNT
+    FROM REJECT_RECORD_COUNT_TEMP;
+    
+    COPY INTO @CDI_DEVBI_DB.FED_TEST_SCHEMA.TEST_STAGE/AFCARS_AAG_output 
+    FROM (
+    	SELECT XML_DATA FROM SCHEMA_NAME.XML_VALID_RECORDS 
+    )
+    FILE_FORMAT = (
+    	TYPE = CSV
+    	FIELD_DELIMITER = NONE
+    	RECORD_DELIMITER = ''
+''
+    	COMPRESSION = NONE
+    	FILE_EXTENSION = ''txt''
+    )
+    SINGLE = TRUE
+    OVERWRITE = TRUE;
+
+
+SELECT GET_PRESIGNED_URL(@CDI_DEVBI_DB.FED_TEST_SCHEMA.TEST_STAGE, ''TARGET_FILE_output.txt'', 86400) INTO :PRESIGNED_URL;
+
+-----     DROPPING THE CALCULATION TABLES    ----- 
+
+REMOVE @CDI_DEVBI_DB.FED_TEST_SCHEMA.TEST_STAGE/AFCARS_AAG_VALID_GROUPED_TEMP_output.txt;
+
+/* 
+DROP TABLE UNUSED TABLES;
+*/
+
+RETURN OBJECT_CONSTRUCT(
+    TO_VARCHAR("PRESIGNED_URL"), PRESIGNED_URL,
+    TO_VARCHAR(''NUMBER_OF_REJECT_RECORDS''), REJECT_RECORD_COUNT,
+    TO_VARCHAR(''NUMBER_OF_VALID_RECORDS''), VALID_RECORD_COUNT
+    
+);
+  
+;
+;
+END;
+';
